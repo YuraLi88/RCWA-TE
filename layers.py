@@ -499,8 +499,16 @@ class GratingLayer:
         if self.optimized and self.plate:
             W = np.eye(2*N+1)
             L = km_fill_1(q_m, eps1)
-            V = 1j*np.diag(L/eps1)
-            Vinv = -1j*np.diag(eps1/L)
+            # Admittance of a homogeneous layer is polarization dependent:
+            # TM (H-field formulation) carries the 1/eps factor, TE does not.
+            # The TM expressions are left exactly as they were so that TM
+            # results stay bit-identical.
+            if polarization=='TM':
+                V = 1j*np.diag(L/eps1)
+                Vinv = -1j*np.diag(eps1/L)
+            else:
+                V = 1j*np.diag(L)
+                Vinv = -1j*np.diag(1.0/L)
             if N==0:
                 A1 = 0.5*np.array([[1.0,Vinv[0,0]],
                                    [1.0,-Vinv[0,0]]]) 
