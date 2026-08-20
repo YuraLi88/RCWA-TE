@@ -7,12 +7,10 @@ below compares the solver against something that is known exactly -- a Fresnel
 / Airy coefficient for a single film, or the energy balance A = 1 - sum(T_m) -
 sum(R_m) -- rather than against a previously recorded number.
 
-Tests that currently fail are marked `xfail(strict=True)` and carry the id of
-the corresponding review finding.  Strict xfail means that once a fix lands the
-test turns into an XPASS *failure*, which forces the marker to be removed.  So:
-
-    green suite today  ==  no regression
-    XPASS after a fix  ==  remove the marker, the bug is gone
+Every finding pinned here has been fixed, so the suite is fully live: 46 tests,
+no xfails.  When the next defect is found, mark its test `xfail(strict=True)`
+with the finding id -- strict xfail turns into an XPASS *failure* the moment a
+fix lands, which forces the marker to be removed rather than left to rot.
 
 Findings pinned here
 --------------------
@@ -23,7 +21,7 @@ H1  eps map leaves eps = 1 on the bottom face of the structure.  FIXED.
     The tests for all four are now live regression guards, not xfails.
 C4  spectrT/spectrR held raw |t|^2 rather than diffraction efficiencies.  FIXED.
     spectrA keeps its zero-order meaning; spectrA_full is the true absorption.
-C5  `eps_inp != 1` violates energy conservation.  STILL OPEN.
+C5  `eps_inp != 1` violates energy conservation.  FIXED.
 
 Running it
 ----------
@@ -297,16 +295,9 @@ EPS_INP = 2.25
 
 
 @pytest.mark.parametrize('pol,theta', [
-    pytest.param('TM', 0.0), pytest.param('TM', 20.0),
-    pytest.param('TE', 0.0), pytest.param('TE', 20.0),
+    ('TM', 0.0), ('TM', 20.0), ('TE', 0.0), ('TE', 20.0),
 ])
-@pytest.mark.xfail(strict=True, reason='C5: the TM reflected-field row in '
-                                       'solver() lacks the 1/eps_inp factor '
-                                       'its transmitted counterpart has, and '
-                                       'R is normalised by eps_inp instead of '
-                                       'sqrt(eps_inp)')
 def test_non_unity_incident_medium(pol, theta):
-    # non-plate layer, so that C1 cannot contaminate the TE cases
     st = uniform_grating_structure(EPS_FILM, D_NM, eps_inp=EPS_INP, eps_out=1.0)
     T, R = st.TR_full(FREQ, 3, Theta=theta, polar=pol)
     R_ref, T_ref = fresnel_film(EPS_INP, EPS_FILM, 1.0, D_NM * 1e-7, LAM_CM, theta, pol)
@@ -315,12 +306,34 @@ def test_non_unity_incident_medium(pol, theta):
 
 
 @pytest.mark.parametrize('pol', ['TM', 'TE'])
-@pytest.mark.xfail(strict=True, reason='C5: energy is not conserved when '
-                                       'eps_inp != 1')
-def test_non_unity_incident_medium_conserves_energy(pol):
+@pytest.mark.parametrize('theta', [0.0, 20.0, 45.0])
+def test_non_unity_incident_medium_conserves_energy(pol, theta):
     st = uniform_grating_structure(EPS_FILM, D_NM, eps_inp=EPS_INP, eps_out=1.0)
-    T, R = st.TR_full(FREQ, 3, Theta=20.0, polar=pol)
+    T, R = st.TR_full(FREQ, 3, Theta=theta, polar=pol)
     assert T.sum() + R.sum() == pytest.approx(1.0, abs=1e-9)
+
+
+@pytest.mark.parametrize('pol,theta', [
+    ('TM', 0.0), ('TM', 30.0), ('TE', 0.0), ('TE', 30.0),
+])
+def test_non_unity_incident_medium_plate_path(pol, theta):
+    """C5 through the plate fast path as well, which C1 also touches."""
+    st = plate_structure(EPS_FILM, D_NM, eps_inp=EPS_INP, eps_out=1.0)
+    T, R = st.TR_full(FREQ, 0, Theta=theta, polar=pol)
+    R_ref, T_ref = fresnel_film(EPS_INP, EPS_FILM, 1.0, D_NM * 1e-7, LAM_CM, theta, pol)
+    assert T[0] == pytest.approx(T_ref, abs=1e-10)
+    assert R[0] == pytest.approx(R_ref, abs=1e-10)
+
+
+@pytest.mark.parametrize('eps_inp,eps_out', [(2.25, 1.0), (1.0, 4.0), (2.25, 4.0)])
+def test_energy_conserved_for_arbitrary_half_spaces(eps_inp, eps_out):
+    """Lossless film between two arbitrary lossless half-spaces."""
+    layer = GratingLayer(eps0=1.0, eps1=6.0, period=0.35, fill=0.5, depth=150)
+    st = GratingStructure([layer, GratingLayer.PlateLayer(eps=3.0, depth=120)],
+                          eps_inp=eps_inp, eps_out=eps_out)
+    for pol in ('TM', 'TE'):
+        T, R = st.TR_full(FREQ, 20, Theta=25.0, polar=pol)
+        assert T.sum() + R.sum() == pytest.approx(1.0, abs=1e-9), pol
 
 
 # ---------------------------------------------------------------------------
