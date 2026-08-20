@@ -16,15 +16,14 @@ test turns into an XPASS *failure*, which forces the marker to be removed.  So:
 
 Findings pinned here
 --------------------
-C1  TE polarisation is computed as TM for every `plate=True` layer.
-    FIXED -- the two C1 tests are now live regression guards, not xfails.
-C2  `GratingLayer2`'s core permittivity eps2 never reaches the loss budget.
-C3  Per-layer `fill` is ignored; `Layers[0].fill` is used for every layer.
+C1  TE polarisation is computed as TM for every `plate=True` layer.  FIXED.
+C2  GratingLayer2's core permittivity eps2 never reaches the loss budget. FIXED.
+C3  Per-layer `fill` ignored in post-processing.  FIXED.
+H1  eps map leaves eps = 1 on the bottom face of the structure.  FIXED.
+    The tests for all four are now live regression guards, not xfails.
 C4  `field_mapping` returns raw |t|^2/|r|^2 instead of diffraction
     efficiencies, and absorption ignores the non-zero orders.
-C5  `eps_inp != 1` violates energy conservation.
-H1  The eps map leaves eps = 1 on the bottom face of the structure, inflating
-    every partial loss by O(1/Nz).
+C5  `eps_inp != 1` violates energy conservation.  STILL OPEN.
 
 Running it
 ----------
@@ -191,11 +190,6 @@ def test_partial_loss_equals_absorption_grid_inside(theta):
 
 
 @pytest.mark.parametrize('theta', [0.0, 30.0])
-@pytest.mark.xfail(strict=True, reason='H1: eps_xz masks layers with '
-                                       '(_z >= z0) & (_z < z1), so a sample '
-                                       'sitting exactly on z_int[-1] keeps '
-                                       'eps = 1 and |Ex|^2 there is |eps|^2 '
-                                       'too large')
 def test_partial_loss_equals_absorption_grid_on_interface(theta):
     """Identical to the test above except that the last z sample lands exactly
     on the bottom interface -- which is what z_range=(0, total_depth) does."""
@@ -297,12 +291,6 @@ def test_non_unity_incident_medium_conserves_energy(pol):
 # 5. multi-medium layers: geometry must be described consistently
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason='C2: GratingLayer2 does not set '
-                                       'layer_type, so eps_structure uses the '
-                                       'two-medium eps_xz and '
-                                       'calculate_partial_loss only weights '
-                                       'Im(eps1) and Im(eps0) -- eps2 is never '
-                                       'integrated')
 def test_gratinglayer2_core_absorption_is_counted():
     """Lossless shell, absorbing core: all of the layer's loss lives in eps2."""
     core = GratingLayer2(eps0=1.0, eps1=3.1 + 0.0j, eps2=-11.0 + 1.6j,
@@ -316,11 +304,6 @@ def test_gratinglayer2_core_absorption_is_counted():
     assert st.p_losses[0].sum() == pytest.approx(absorption_from_orders(st), rel=2e-2)
 
 
-@pytest.mark.xfail(strict=True, reason='C3: GratingStructure caches '
-                                       'self.fill = Layers[0].fill and uses it '
-                                       'for every layer, so a stack of slices '
-                                       'with different fills is drawn with the '
-                                       'first slice profile throughout')
 def test_each_layer_uses_its_own_fill():
     fills = [0.2, 0.5, 0.8]
     eps_metal = 9.0 + 1j
@@ -336,6 +319,38 @@ def test_each_layer_uses_its_own_fill():
         drawn = float(np.mean(np.isclose(eps_map[row], eps_metal)))
         assert drawn == pytest.approx(f, abs=0.02), (
             f'slice {row}: fill {f} was drawn as {drawn:.2f}')
+
+
+def test_wide_slice_strip_wraps_around_the_period_edge():
+    """Each layer's strip is centred on the common Fourier origin, which the
+    field routines place at Layers[0].fill/2.  A slice wider than the first one
+    therefore wraps across x = 0/1, and must be drawn on BOTH sides -- the case
+    a naive `x < Layer.fill` mask cannot express."""
+    eps_metal = 9.0 + 1j
+    layers = [GratingLayer(eps0=1.0, eps1=eps_metal, period=1.0, fill=0.2, depth=100),
+              GratingLayer(eps0=1.0, eps1=eps_metal, period=1.0, fill=0.8, depth=100)]
+    st = GratingStructure(layers, eps_inp=1.0, eps_out=1.0)
+
+    x_um = np.linspace(0, 1.0, 1001)
+    eps_map = st.eps_structure(*np.meshgrid(x_um, np.array([50e-7, 150e-7])), FREQ)
+    wide = np.isclose(eps_map[1], eps_metal)
+
+    # centre f0/2 = 0.1, half width 0.4  ->  [0.7, 1.0) U [0.0, 0.5)
+    assert wide[np.argmin(abs(x_um - 0.05))], 'left lobe (wrapped) missing'
+    assert wide[np.argmin(abs(x_um - 0.85))], 'right lobe (wrapped) missing'
+    assert not wide[np.argmin(abs(x_um - 0.60))], 'gap should be background'
+    assert float(np.mean(wide)) == pytest.approx(0.8, abs=0.02)
+
+
+def test_partial_loss_survives_a_wrapped_strip():
+    """Energy balance for the same wrapping geometry: if the loss mask lost the
+    wrapped lobe the budget would come out short."""
+    layers = [GratingLayer(eps0=1.0, eps1=-15 + 3j, period=0.35, fill=0.25, depth=80),
+              GratingLayer(eps0=1.0, eps1=-15 + 3j, period=0.35, fill=0.75, depth=80)]
+    st = GratingStructure(layers, eps_inp=1.0, eps_out=1.0)
+    st.calcTRLandPartLoss(np.array([FREQ]), 24, (801, 1601), (0.0, 160.0),
+                          Theta=0.0, simps_rule=True, verbose=False)
+    assert st.p_losses[0].sum() == pytest.approx(absorption_from_orders(st), rel=3e-2)
 
 
 # ---------------------------------------------------------------------------
