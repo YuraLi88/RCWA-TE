@@ -21,8 +21,8 @@ C2  GratingLayer2's core permittivity eps2 never reaches the loss budget. FIXED.
 C3  Per-layer `fill` ignored in post-processing.  FIXED.
 H1  eps map leaves eps = 1 on the bottom face of the structure.  FIXED.
     The tests for all four are now live regression guards, not xfails.
-C4  `field_mapping` returns raw |t|^2/|r|^2 instead of diffraction
-    efficiencies, and absorption ignores the non-zero orders.
+C4  spectrT/spectrR held raw |t|^2 rather than diffraction efficiencies.  FIXED.
+    spectrA keeps its zero-order meaning; spectrA_full is the true absorption.
 C5  `eps_inp != 1` violates energy conservation.  STILL OPEN.
 
 Running it
@@ -208,7 +208,13 @@ def test_lossless_structure_has_no_partial_loss():
 
 
 # ---------------------------------------------------------------------------
-# 3. what field_mapping reports as T and R
+# 3. the two spectrum conventions
+#
+#   field_mapping's RETURNED T, R stay the raw |t0|^2, |r0|^2 by design -- that
+#   convention is deliberately preserved, and the efficiencies are published on
+#   self.T_diffraction / self.R_diffraction instead.
+#   The drivers must store efficiencies in spectrT/spectrR, and the true
+#   absorption in spectrA_full; spectrA keeps its zero-order meaning.
 # ---------------------------------------------------------------------------
 
 def _grating_on_substrate(eps_out):
@@ -217,30 +223,42 @@ def _grating_on_substrate(eps_out):
     return GratingStructure(layers, eps_inp=1.0, eps_out=eps_out)
 
 
-@pytest.mark.xfail(strict=True, reason='C4: field_mapping returns the raw '
-                                       'Fourier amplitude |t[N]|^2, which is '
-                                       'the zero-order efficiency only when '
-                                       'eps_out == 1')
-def test_field_mapping_reports_zero_order_efficiency():
+def test_field_mapping_return_stays_the_raw_amplitude():
+    """Preserved convention: the RETURNED T, R are |t0|^2 and |r0|^2, which are
+    the efficiencies only when eps_out == 1.  Kept so that existing callers are
+    unaffected; the efficiencies live on the T_diffraction attributes."""
     neq = 12
     st = _grating_on_substrate(eps_out=15.0 + 0.15j)
     *_, T, R = st.field_mapping(FREQ, neq, 11, 21, 0.0, 860.0, Theta=0.0)
-    assert T == pytest.approx(st.T_diffraction[neq], rel=1e-9)
-    assert R == pytest.approx(st.R_diffraction[neq], rel=1e-9)
+    assert float(np.real(T)) == pytest.approx(abs(np.squeeze(st.t)[neq])**2, rel=1e-9)
+    assert float(np.real(T)) != pytest.approx(st.T_diffraction[neq], rel=1e-3)
 
 
-def test_field_mapping_reports_zero_order_efficiency_when_eps_out_is_one():
-    """The eps_out == 1 case that masked C4 -- keep it as a control."""
+@pytest.mark.parametrize('eps_out', [1.0, 15.0 + 0.15j])
+def test_driver_stores_zero_order_efficiency(eps_out):
+    """C4a: spectrT/spectrR must be efficiencies, so that spectrT equals
+    spectrTfull[:, Neq] and the two drivers agree on what spectrT means."""
     neq = 12
-    st = _grating_on_substrate(eps_out=1.0)
-    *_, T, R = st.field_mapping(FREQ, neq, 11, 21, 0.0, 860.0, Theta=0.0)
-    assert T == pytest.approx(st.T_diffraction[neq], rel=1e-9)
-    assert R == pytest.approx(st.R_diffraction[neq], rel=1e-9)
+    st = _grating_on_substrate(eps_out=eps_out)
+    st.calcTRLandPartLoss(np.array([FREQ]), neq, (11, 21), (0.0, 860.0),
+                          Theta=0.0, simps_rule=True, verbose=False)
+    assert st.spectrT[0] == pytest.approx(st.spectrTfull[0][neq], rel=1e-12)
+    assert st.spectrR[0] == pytest.approx(st.spectrRfull[0][neq], rel=1e-12)
+    assert st.spectrT[0] <= 1.0 and st.spectrA[0] >= -1e-12
 
 
-@pytest.mark.xfail(strict=True, reason='C4: spectrA = 1 - spectrT - spectrR '
-                                       'uses the zero order only and ignores '
-                                       'the propagating +-1, +-2 ... orders')
+def test_zero_order_fix_is_a_noop_when_eps_out_is_one():
+    """The narrow case the old convention relied on: for eps_inp = eps_out = 1
+    the raw amplitude IS the zero-order efficiency, at any angle.  Correcting
+    C4a must therefore change nothing here."""
+    neq = 12
+    for theta in (0.0, 35.0):
+        st = _grating_on_substrate(eps_out=1.0)
+        *_, T, R = st.field_mapping(FREQ, neq, 11, 21, 0.0, 860.0, Theta=theta)
+        assert float(np.real(T)) == pytest.approx(st.T_diffraction[neq], rel=1e-12)
+        assert float(np.real(R)) == pytest.approx(st.R_diffraction[neq], rel=1e-12)
+
+
 def test_absorption_accounts_for_every_propagating_order():
     """Period 1.6 um at 800 nm -> five propagating orders on each side."""
     neq = 20
@@ -250,7 +268,25 @@ def test_absorption_accounts_for_every_propagating_order():
     st.calcTRLandPartLoss(np.array([FREQ]), neq, (11, 21), (0.0, 519.0),
                           Theta=0.0, simps_rule=True, verbose=False)
     assert (st.spectrTfull[0] > 0).sum() > 1, 'test needs higher orders to propagate'
-    assert st.spectrA[0] == pytest.approx(absorption_from_orders(st), rel=1e-6)
+    # spectrA_full is the true absorption ...
+    assert st.spectrA_full[0] == pytest.approx(absorption_from_orders(st), rel=1e-9)
+    # ... while spectrA deliberately keeps its zero-order meaning
+    assert st.spectrA[0] == pytest.approx(1 - st.spectrT[0] - st.spectrR[0], rel=1e-12)
+    assert st.spectrA[0] != pytest.approx(st.spectrA_full[0], rel=1e-3)
+
+
+def test_spectrA_full_agrees_between_drivers():
+    """calcTRLspectra and calcTRLandPartLoss must define spectrT and
+    spectrA_full identically."""
+    neq = 12
+    a = _grating_on_substrate(eps_out=15.0 + 0.15j)
+    a.calcTRLspectra(0, 0, vrange=np.array([FREQ]), Neq=neq, vebrose=False)
+    b = _grating_on_substrate(eps_out=15.0 + 0.15j)
+    b.calcTRLandPartLoss(np.array([FREQ]), neq, (11, 21), (0.0, 860.0),
+                         Theta=0.0, simps_rule=True, verbose=False)
+    assert a.spectrT[0] == pytest.approx(b.spectrT[0], rel=1e-9)
+    assert a.spectrR[0] == pytest.approx(b.spectrR[0], rel=1e-9)
+    assert a.spectrA_full[0] == pytest.approx(b.spectrA_full[0], rel=1e-9)
 
 
 # ---------------------------------------------------------------------------

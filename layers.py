@@ -1302,6 +1302,29 @@ class GratingStructure:
         x_arr = np.linspace(0, 1, Nx)[:-1]
         return fourier_frame_x(x_arr, self.x_shift), 1.0/(Nx - 1)
 
+    def _absorption_from_orders(self, suffix=''):
+        """Absorbed fraction summed over every propagating diffraction order.
+
+        Two different quantities are stored by the spectrum drivers and they
+        must not be confused:
+
+          spectrT / spectrR   zero-order diffraction EFFICIENCIES
+          spectrA             1 - spectrT - spectrR, the complement of the
+                              zero order.  This is NOT the absorption once
+                              higher orders propagate -- which happens easily
+                              for a substrate with eps_out > 1, since orders
+                              transmit whenever |q_m| < sqrt(eps_out).
+          spectrTfull / spectrRfull   efficiency of every order
+          spectrA_full        1 - sum(T_m) - sum(R_m), the true absorption
+
+        The name `spectrA` is kept as it was so that existing scripts and
+        figures are unaffected; `spectrA_full` is the quantity to plot as
+        absorptivity.
+        """
+        T = np.real(getattr(self, 'spectrTfull'+suffix))
+        R = np.real(getattr(self, 'spectrRfull'+suffix))
+        return 1.0 - T.sum(axis=1) - R.sum(axis=1)
+
     def calculate_partial_loss(self, zz, Ex, Ez, v, Theta, simps_rule=True):
         """Absorbed power fraction of each layer.
 
@@ -1393,10 +1416,10 @@ class GratingStructure:
                     maping =self.field_mapping(v, Neq, Nx,Ny, z_min, z_max, Theta=Theta)
                     XX, YY, H, Ex, Ez, T, R = maping
                     self.p_losses[i] = self.calculate_partial_loss(YY, Ex, Ez, v,Theta, simps_rule = simps_rule)
-                    self.spectrT[i] = T
-                    self.spectrR[i] = R
                     self.spectrTfull[i] = self.T_diffraction
                     self.spectrRfull[i] = self.R_diffraction
+                    self.spectrT[i] = self.T_diffraction[Neq]
+                    self.spectrR[i] = self.R_diffraction[Neq]
                     bar.update(i)
         else:
             for i in range(N):
@@ -1404,11 +1427,12 @@ class GratingStructure:
                 maping =self.field_mapping(v, Neq, Nx,Ny, z_min, z_max, Theta=Theta)
                 XX, YY, H, Ex, Ez, T, R = maping
                 self.p_losses[i] = self.calculate_partial_loss(YY, Ex, Ez, v,Theta, simps_rule = simps_rule )
-                self.spectrT[i] = T
-                self.spectrR[i] = R
                 self.spectrTfull[i] = self.T_diffraction
                 self.spectrRfull[i] = self.R_diffraction
+                self.spectrT[i] = self.T_diffraction[Neq]
+                self.spectrR[i] = self.R_diffraction[Neq]
         self.spectrA = 1-self.spectrT - self.spectrR
+        self.spectrA_full = self._absorption_from_orders()
 
     def calcTRLandPartLoss_wavelength(self, 
                                       lambda_range, 
@@ -1482,10 +1506,10 @@ class GratingStructure:
             self.p_losses[i] = p_loss
             
             # Store Transmission and Reflection
-            self.spectrT[i] = T
-            self.spectrR[i] = R
             self.spectrTfull[i] = self.T_diffraction  # Ensure self.T_diffraction is updated in field_mapping
             self.spectrRfull[i] = self.R_diffraction  # Ensure self.R_diffraction is updated in field_mapping
+            self.spectrT[i] = self.T_diffraction[Neq]
+            self.spectrR[i] = self.R_diffraction[Neq]
             
             if verbose:
                 bar.update(i)
@@ -1494,6 +1518,7 @@ class GratingStructure:
             bar.finish()
         
         self.spectrA = 1 - self.spectrT - self.spectrR
+        self.spectrA_full = self._absorption_from_orders()
 
 
 
@@ -1515,10 +1540,10 @@ class GratingStructure:
                     maping =self.field_mapping(v, Neq, Nx,Ny, z_min, z_max, Theta=Theta)
                     XX, YY, H, Ex, Ez, T, R = maping
                     self.p_losses_theta[i] = self.calculate_partial_loss(YY, Ex, Ez, v,Theta, simps_rule = simps_rule)
-                    self.spectrT_theta[i] = T
-                    self.spectrR_theta[i] = R
                     self.spectrTfull_theta[i] = self.T_diffraction
                     self.spectrRfull_theta[i] = self.R_diffraction
+                    self.spectrT_theta[i] = self.T_diffraction[Neq]
+                    self.spectrR_theta[i] = self.R_diffraction[Neq]
                     bar.update(i)
         else:
             for i in range(N):
@@ -1526,10 +1551,11 @@ class GratingStructure:
                 maping =self.field_mapping(v, Neq, Nx,Ny, z_min, z_max, Theta=Theta)
                 XX, YY, H, Ex, Ez, T, R = maping
                 self.p_losses_theta[i] = self.calculate_partial_loss(YY, Ex, Ez, v,Theta, simps_rule = simps_rule)
-                self.spectrT_theta[i] = T
-                self.spectrR_theta[i] = R
                 self.spectrTfull_theta[i] = self.T_diffraction
                 self.spectrRfull_theta[i] = self.R_diffraction
+                self.spectrT_theta[i] = self.T_diffraction[Neq]
+                self.spectrR_theta[i] = self.R_diffraction[Neq]
+        self.spectrA_theta_full = self._absorption_from_orders('_theta')
 
     def calcTRLpart_loss_angle_averaged(self,v_range, Neq, pxy, z_range, Theta = 0, N_theta=5, theta_sigma = 1,simps_rule = False, verbose = True):
         """Calculate TRL spectra and partial losses for a range of frequencies with averaging over angles.
@@ -1576,8 +1602,8 @@ class GratingStructure:
                     for j, theta in enumerate(theta_range+Theta):
                         maping =self.field_mapping(v, Neq, Nx,Ny, z_min, z_max, Theta=theta)
                         XX, YY, H, Ex, Ez, T, R = maping
-                        T_theta[j] = T
-                        R_theta[j] = R
+                        T_theta[j] = self.T_diffraction[Neq]
+                        R_theta[j] = self.R_diffraction[Neq]
                         p_losses[j] = self.calculate_partial_loss(YY, Ex, Ez, v,theta, simps_rule = simps_rule)
                     spl_losses = [CubicSpline(theta_range, p_losses[:,i]) for i in range(len(self.Layers))]
                     spl_T = CubicSpline(theta_range, T_theta)
@@ -1599,8 +1625,8 @@ class GratingStructure:
                 for j, theta in enumerate(theta_range):
                     maping =self.field_mapping(v, Neq, Nx,Ny, z_min, z_max, Theta=theta)
                     XX, YY, H, Ex, Ez, T, R = maping
-                    T_theta[j] = T
-                    R_theta[j] = R
+                    T_theta[j] = self.T_diffraction[Neq]
+                    R_theta[j] = self.R_diffraction[Neq]
                     p_losses[j] = self.calculate_partial_loss(YY, Ex, Ez, v,theta, simps_rule = simps_rule)
                 spl_losses = [CubicSpline(theta_range, p_losses[:,i]) for i in range(len(self.Layers))]
                 spl_T = CubicSpline(theta_range, T_theta)
@@ -1788,6 +1814,7 @@ class GratingStructure:
                     self.spectrTfull[i] = T
                     self.spectrRfull[i] = R
         self.spectrA = 1-self.spectrT - self.spectrR
+        self.spectrA_full = self._absorption_from_orders()
 
     def calcTRLspectra_wavelength(self, 
                                 lambda0, 
@@ -1856,6 +1883,7 @@ class GratingStructure:
             bar.finish()
         
         self.spectrA = 1 - self.spectrT - self.spectrR
+        self.spectrA_full = self._absorption_from_orders()
 
 
 
@@ -1885,6 +1913,7 @@ class GratingStructure:
                 self.spectrTfull_theta[i] = T
                 self.spectrRfull_theta[i] = R
         self.spectrA_theta = 1-self.spectrT_theta - self.spectrR_theta
+        self.spectrA_theta_full = self._absorption_from_orders('_theta')
 
 
     def spectraTMTE(self,v0,v1,N=100,Neq=50,units='THz',mode='T'):
