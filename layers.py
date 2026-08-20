@@ -121,7 +121,9 @@ def eps_xz(x,z, eps_i, zi, plates, fill, period):#
     for i in range(len(zi)-1):
         z0=zi[i]
         z1=zi[i+1]
-        mask = (_z>=z0) & (_z<z1)
+        # final interface inclusive, otherwise a sample landing exactly on the
+        # bottom of the structure keeps eps = 1 (finding H1)
+        mask = (_z>=z0) & (_z<=z1) if i==len(zi)-2 else (_z>=z0) & (_z<z1)
         eps_z[mask] = eps_i[i,0]
         eps_z_op[mask] = eps_i[i,0]
         if not plates[i]:
@@ -161,7 +163,8 @@ def eps_xz_new(x, z, eps_i, zi, plates, fill_arr, period):
 
     for i in range(len(zi) - 1):
         z0, z1 = zi[i], zi[i + 1]  # Start and end points of the current layer
-        mask = (_z >= z0) & (_z < z1)  # Creating a mask for the current layer in z-axis
+        # final interface inclusive (finding H1)
+        mask = (_z >= z0) & (_z <= z1) if i == len(zi)-2 else (_z >= z0) & (_z < z1)
         eps_layer = np.zeros(x.shape[1], dtype=np.complex128)  # Initialize layer's eps array
 
         if not plates[i]:  # Check if the layer is not a plate
@@ -183,6 +186,56 @@ def eps_xz_new(x, z, eps_i, zi, plates, fill_arr, period):
         eps[mask] = np.broadcast_to(eps_layer[None,...], (N, eps_layer.shape[0]))  # Assign the calculated eps values to the main array
         # eps[:, mask] = eps_layer
         
+    return eps
+
+
+def fourier_frame_x(x_norm, x_shift):
+    """Map a normalised plotting abscissa to the Fourier frame [-0.5, 0.5).
+
+    The field routines evaluate the harmonics at X - x_shift*period, so the
+    permittivity map and the loss masks must use the same origin, otherwise
+    every layer whose fill differs from Layers[0] is drawn in the wrong place.
+    """
+    return (x_norm - x_shift + 0.5) % 1.0 - 0.5
+
+
+def eps_xz_segments(x, z, segments, zi, period, x_shift=0.0):
+    """Real-space permittivity map driven by per-layer segment descriptions.
+
+    Args:
+        x, z:     meshgrids; x in the same length unit as `period`, z as `zi`.
+        segments: segments[i] is Layer.eps_segments() for layer i.
+        zi:       layer interfaces.
+        period:   grating period, same unit as x.
+        x_shift:  normalised offset of the plotting frame w.r.t. the Fourier
+                  frame (see fourier_frame_x).
+
+    Every layer is drawn with its OWN profile, and a strip that wraps across
+    the period edge is handled because the abscissa is wrapped, not clipped.
+    """
+    eps = np.ones(x.shape, dtype=np.complex128)
+    _z = z[:, 0]
+    xn = fourier_frame_x(x[0]/period, x_shift)
+    n_layers = len(zi) - 1
+    for i in range(n_layers):
+        z0, z1 = zi[i], zi[i+1]
+        # The final interface is inclusive: a sample landing exactly on the
+        # bottom of the structure must still belong to the last layer, or it
+        # keeps eps = 1 and |Ex|^2 = |Dx/1|^2 blows up there.
+        if i == n_layers - 1:
+            zmask = (_z >= z0) & (_z <= z1)
+        else:
+            zmask = (_z >= z0) & (_z < z1)
+        if not zmask.any():
+            continue
+        # start from the outermost medium so that round-off at a segment edge
+        # can never leave a sample unassigned
+        row = np.full(x.shape[1], segments[i][0][2], dtype=np.complex128)
+        for x0, x1, eps_s in segments[i]:
+            if x1 <= x0:
+                continue
+            row[(xn >= x0) & (xn < x1)] = eps_s
+        eps[zmask] = row
     return eps
 
 
@@ -456,6 +509,21 @@ class GratingLayer:
         return f_coefs  
  
  
+    def eps_segments(self, v=None):
+        """Profile along one period, as an ordered partition of x' in [-0.5,0.5).
+
+        Returns [(x0, x1, eps), ...] with x0 < x1, covering the period exactly.
+        The convention is the one eps_1()/eps_inv() use: strips are CENTRED on
+        x' = 0.  Having a single description means the real-space map and the
+        loss integral cannot disagree with the Fourier coefficients the solver
+        was given.
+        """
+        if self.plate:
+            return [(-0.5, 0.5, self.eps_v(v))]
+        f = 0.5*self.fill
+        eps1, eps0 = self.eps_v(v), self.eps_v_op(v)
+        return [(-0.5, -f, eps0), (-f, f, eps1), (f, 0.5, eps0)]
+
     def qm_fill(self,N,k0):
         q0 = 2*pi/self.period/k0
         return q0*np.arange(-N,N+1)
@@ -636,6 +704,17 @@ class GratingLayer2(GratingLayer):
             f_coefs[N] += eps0
         return f_coefs  
         
+    def eps_segments(self, v=None):
+        """Nested three-medium profile: core eps2 of width fill inside a shell
+        eps1 of width fill2, on a background eps0.  Matches eps_1()."""
+        if self.plate:
+            return [(-0.5, 0.5, self.eps_v(v))]
+        f1, f2 = 0.5*self.fill, 0.5*self.fill2
+        eps2 = self.eps2(v) if callable(self.eps2) else self.eps2
+        eps1, eps0 = self.eps_v(v), self.eps_v_op(v)
+        return [(-0.5, -f2, eps0), (-f2, -f1, eps1), (-f1, f1, eps2),
+                (f1, f2, eps1), (f2, 0.5, eps0)]
+
     def eps_inv(self,N, v=None):
         _eps1 = np.vectorize(lambda x: eps_i(x,self.fill))
         _eps2 = np.vectorize(lambda x: eps_i(x,self.fill2))
@@ -726,8 +805,30 @@ class GratingLayerN(GratingLayer):
         f_coefs[N] += eps_arr_v[-1]
         return f_coefs
     
+    def eps_segments(self, v=None):
+        """Nested profile built from the cumulative widths in fill_arr.
+
+        This mirrors eps_1(), which sums centred strips and therefore describes
+        nested slabs, NOT the sequential regions eps_xz_new() used to draw.
+        Matching eps_1() keeps the map consistent with the solver; whether
+        fill_arr *ought* to mean nested or sequential is a separate question
+        that would change eps_1() and this method together.
+        """
+        if self.plate:
+            return [(-0.5, 0.5, np.atleast_1d(self.eps_v(v))[0])]
+        eps = self.eps_v(v)
+        h = [0.5*f for f in self.fill_arr]
+        segs = [(-0.5, -h[-1], eps[-1])]
+        for i in range(len(h)-1, 0, -1):
+            segs.append((-h[i], -h[i-1], eps[i]))
+        segs.append((-h[0], h[0], eps[0]))
+        for i in range(len(h)-1):
+            segs.append((h[i], h[i+1], eps[i+1]))
+        segs.append((h[-1], 0.5, eps[-1]))
+        return segs
+
     def eps_inv(self,N, v=None):
-        # import pdb 
+        # import pdb
         # pdb.set_trace()
         f_coefs = np.zeros((2*N+1,), dtype=np.complex128)
         eps_arr_v = self.eps_v(v)
@@ -780,42 +881,25 @@ class GratingStructure:
             rep = '!'.join([key+value for key,value in it.items()])
             return rep    
     
-    def eps_structure_for_GratingLayer(self, X, Y, v):
-        plates = np.array([it.plate for it in self.Layers])
-        eps_i = np.zeros((len(self.Layers),2), dtype = np.complex128)
-        for i,layer in enumerate(self.Layers):
-            eps_i[i,0] = layer.eps_v(v)
-            eps_i[i,1] = layer.eps_v_op(v)
-        fill = self.fill
-        
-        return eps_xz(X,Y, eps_i, self.z_int, plates, fill, self.Layers[0].period*1e4)
-    
-    def eps_structure_for_GratingLayerN(self, X, Y, v):
+    @property
+    def x_shift(self):
+        """Normalised offset between the plotting frame and the Fourier frame.
+
+        The field routines evaluate the harmonics at X - Layers[0].fill*period/2;
+        the permittivity map and the loss masks must use the same origin.
         """
-        Compute the dielectric constant structure for a given frequency.
-
-        Args:
-            X, Y: Meshgrid arrays for spatial coordinates.
-            v: Frequency at which dielectric constants are evaluated.
-
-        Returns:
-            2D array representing spatial distribution of dielectric constant.
-        """
-        plates = np.array([layer.plate for layer in self.Layers])  # Determine if each layer is a plate
-        fill_arr = [layer.fill_arr for layer in self.Layers]  # Collect fill arrays from each layer
-        eps_i = [np.array(layer.eps_v(v)) for layer in self.Layers]  # Collect dielectric constants for each fill in each layer at frequency v
-
-        return eps_xz_new(X, Y, eps_i, self.z_int, plates, fill_arr, self.Layers[0].period * 1e4)  # Call eps_xz to calculate the spatial distribution of dielectric constant
+        return 0.5*getattr(self.Layers[0], 'fill', 0.0)
 
     def eps_structure(self, X, Y, v):
-        # import pdb 
-        # pdb.set_trace()
-        if self.Layers[0].layer_type == 'GratingLayer':
-            return self.eps_structure_for_GratingLayer(X, Y, v)
-        elif self.Layers[0].layer_type == 'GratingLayerN':
-            return self.eps_structure_for_GratingLayerN(X, Y, v)
-        else:
-            raise TypeError("Unsupported layer type")
+        """Spatial distribution of the permittivity on the (X, Y) meshgrid.
+
+        X is in micrometres and Y in centimetres, matching the field routines.
+        Each layer is drawn from its own eps_segments(), so mixed stacks and
+        per-layer fill factors are handled without any layer_type dispatch.
+        """
+        segments = [Layer.eps_segments(v) for Layer in self.Layers]
+        return eps_xz_segments(X, Y, segments, self.z_int,
+                               self.Layers[0].period*1e4, x_shift=self.x_shift)
 
     def solver(self,k0,N, Theta = 0, dispersion=True,polarization='TM',
               field = False):
@@ -1201,134 +1285,93 @@ class GratingStructure:
             Hm_z, Dxm_z, Ezm_z = self.get_field_coefs_on_z(z, k0, km, l_free, N, z_int, theta=Theta)
             _Ez[idx_z] = Ezm_z.dot(exmX)
             _Dx[idx_z] = Dxm_z.dot(exmX)   
-        xx0, zz = np.meshgrid(X0,Z)
+        xx0, zz = np.meshgrid(X*1e4,Z)
         _eps = self.eps_structure(xx0,zz, v)
         _Ex = _Dx/_eps
         return xx, zz,_Ex, _Ez, T, R
 
-    def calculate_partial_loss(self, zz, Ex, Ez, v,Theta, simps_rule = True):
-        # try:
-        z_arr = zz[:,0]
-        mask = (z_arr>=0) & (z_arr<=self.z_int[-1])
+    def _x_cell_weights(self, Nx):
+        """Fourier-frame abscissa and cell width for the periodic x grid.
+
+        The field grid is X = linspace(0, period, Nx), whose first and last
+        samples are the same physical point.  Dropping the duplicate leaves a
+        uniform periodic grid of Nx-1 cells of width 1/(Nx-1); summing
+        f_i * h over the samples of a region is exactly conservative, i.e. the
+        per-medium integrals of one layer always add up to the full period.
+        """
+        x_arr = np.linspace(0, 1, Nx)[:-1]
+        return fourier_frame_x(x_arr, self.x_shift), 1.0/(Nx - 1)
+
+    def calculate_partial_loss(self, zz, Ex, Ez, v, Theta, simps_rule=True):
+        """Absorbed power fraction of each layer.
+
+        The x integration follows that layer's own eps_segments(), so every
+        medium is weighted by its own Im(eps) -- including the core of a
+        GratingLayer2, which the previous two-medium split ignored -- and a
+        strip that wraps across the period edge is handled correctly.
+        """
+        z_arr = zz[:, 0]
+        mask = (z_arr >= 0) & (z_arr <= self.z_int[-1])
         z_arr = z_arr[mask]
-        Ex = Ex[mask]
-        Ez = Ez[mask]
-        w = np.abs(Ex)**2 + np.abs(Ez)**2
-        x_arr = np.linspace(0,1,w.shape[1])
-        l_idxs = np.zeros(len(z_arr), dtype = np.int32)
-        losses_z = np.zeros(len(z_arr))
-        losses_z_op = np.zeros(len(z_arr))
-        if self.Layers[0].layer_type == 'GratingLayerN':
-            epsN_max = max([len(Layer.eps_arr) for Layer in self.Layers])
-            losses_z = np.zeros((len(z_arr),epsN_max))
-        for idx, z in enumerate(z_arr):
-            L_idx = get_layer_id(z, self.z_int)
-            l_idxs[idx] = L_idx
-            Layer = self.Layers[L_idx]
-            
-            if Layer.plate:
-                if simps_rule:
-                    losses_z[idx] = simps(w[idx],x_arr)
-                else:
-                    w_sp = CubicSpline(x_arr, w[idx])
-                    losses_z[idx] = w_sp.integrate(0,1)
-            elif Layer.layer_type != 'GratingLayerN':
-                #pdb.set_trace()
-                ma = x_arr<self.fill
-                losses_z[idx] = simps(w[idx][ma], x=x_arr[ma])# w_sp.integrate(0.0,self.fill)#  #w_sp.integrate(0.02,self.fill-0.02) # self.fill*w_sp[x_arr<self.fill].mean() #.integrate(0.02,self.fill-0.02)
-                # print(f'losses_z[{idx}] = ',losses_z[idx])
-                w_sp = CubicSpline(x_arr, w[idx])
-                losses_z_op[idx] = w_sp.integrate(self.fill,1)
-                # print(f'losses_z_op[{idx}] = ',losses_z_op[idx])
-            elif Layer.layer_type == 'GratingLayerN':
-                fills = [0]+Layer.fill_arr+[1.0]
-                for l_idx,_ in enumerate(Layer.eps_arr):
-                    x0 = fills[l_idx]
-                    x1 = fills[l_idx+1]
-                    ma = (x_arr>=x0) & (x_arr<=x1)
-                    # if np.sum(ma)>3:
-                    #     losses_z[idx,l_idx] = simps(w[idx][ma], x=x_arr[ma])
-                    # else:
-                    losses_z[idx,l_idx] = trapz(w[idx][ma], x=x_arr[ma])
-            else: 
-                raise ValueError("Unknown layer type")
-            
+        w = np.abs(Ex[mask])**2 + np.abs(Ez[mask])**2
+
+        xn, dx = self._x_cell_weights(w.shape[1])
+        w = w[:, :-1]                       # drop the duplicated period edge
+
+        l_idxs = np.array([get_layer_id(z, self.z_int) for z in z_arr],
+                          dtype=np.int32)
         part_losses = np.zeros(len(self.Layers))
-        
+
         for L_idx, Layer in enumerate(self.Layers):
-            # pdb.set_trace()
-            mask = l_idxs==L_idx 
-            if np.sum(mask)<2:
+            zmask = l_idxs == L_idx
+            if np.sum(zmask) < 2:
                 continue
-
-            # print(mask, l_idxs, L_idx )
-            _Z = z_arr[mask]
-            _losses = losses_z[mask]
-            _Z -= _Z[0]
-            im_eps1 = np.imag(Layer.eps_v(v))
-            # print('im_eps=', im_eps1)
-            
-            if Layer.plate:
-                if simps_rule:
-                    part_losses[L_idx] = im_eps1*simps(_losses,_Z)
-                else:
-                    w_z_sp = CubicSpline(_Z, _losses)
-                    part_losses[L_idx] = im_eps1*w_z_sp.integrate(0,_Z[-1])
-       
-            elif Layer.layer_type != 'GratingLayerN':
-                im_eps0 = np.imag(Layer.eps_v_op(v))
-                # print('im_eps0=', im_eps0)
-                _losses_op = losses_z_op[mask]
-                tot_losses = im_eps0*_losses_op+im_eps1*_losses
-                #w_z_sp = CubicSpline(_Z, tot_losses)
-                if len(_Z>0):
-                    part_losses[L_idx] = simps(tot_losses, _Z) #w_z_sp.integrate(0,_Z[-1])
-                else:
-                    part_losses[L_idx] = 0
-                # print('int_grat = ',w_z_sp.integrate(0,_Z[-1]), ' simps=',simps(tot_losses, _Z))
-            elif Layer.layer_type == 'GratingLayerN':
-                fills = [0]+Layer.fill_arr+[1]
-                eps_arr = Layer.eps_v(v)
-                for l_idx, eps_i in enumerate(eps_arr):
-                    im_eps_i = np.imag(eps_i)
-                    _p_loss = im_eps_i*simps(_losses[:,l_idx],_Z)
-                    part_losses[L_idx] += _p_loss
-
+            _Z = z_arr[zmask] - z_arr[zmask][0]
+            _w = w[zmask]
+            loss_z = np.zeros(len(_Z))
+            for x0, x1, eps_s in Layer.eps_segments(v):
+                im_eps = np.imag(eps_s)
+                if x1 <= x0 or im_eps == 0:
+                    continue
+                xmask = (xn >= x0) & (xn < x1)
+                if not xmask.any():
+                    continue
+                loss_z += im_eps*_w[:, xmask].sum(axis=1)*dx
+            if simps_rule:
+                part_losses[L_idx] = simps(loss_z, _Z)
             else:
-                raise ValueError("The type of Layer is unknown")
+                part_losses[L_idx] = CubicSpline(_Z, loss_z).integrate(0, _Z[-1])
+
         part_losses *= 2*pi*v/(c_light*np.cos(np.radians(Theta)))
         return part_losses
 
     def get_loss_profile_z(self, zz, Ex, Ez, v, simps_rule = False):
+        """Depth profile of the absorbed power density, per unit z.
+
+        Uses the same per-layer segment description as calculate_partial_loss,
+        so the two always agree: integrating this profile over z reproduces
+        sum(p_losses) at normal incidence.  `simps_rule` is kept for backward
+        compatibility and no longer affects the x quadrature.
+        """
         z_arr = zz[:,0]
         mask = (z_arr>=0) & (z_arr<=self.z_int[-1])
         z_arr = z_arr[mask]
-        Ex = Ex[mask]
-        Ez = Ez[mask]
-        w = np.abs(Ex)**2+np.abs(Ez)**2
-        x_arr = np.linspace(0,1,w.shape[1])
-        l_idxs = np.zeros(len(z_arr), dtype = np.int32)
-        losses_z = np.zeros(len(z_arr))
-        losses_z_op = np.zeros(len(z_arr))
-        total_loss_z = np.zeros_like(losses_z)
+        w = np.abs(Ex[mask])**2 + np.abs(Ez[mask])**2
+
+        xn, dx = self._x_cell_weights(w.shape[1])
+        w = w[:, :-1]
+        total_loss_z = np.zeros(len(z_arr))
         for idx, z in enumerate(z_arr):
-            L_idx = get_layer_id(z, self.z_int)
-            l_idxs[idx] = L_idx
-            Layer = self.Layers[L_idx]
-            im_eps1 = np.imag(Layer.eps_v(v))
-            im_eps0 = np.imag(Layer.eps_v_op(v))
-            w_sp = CubicSpline(x_arr, w[idx])
-            if Layer.plate:
-                if simps_rule:
-                    losses_z[idx] = simps(w[idx],x_arr)
-                else:
-                    losses_z[idx] = w_sp.integrate(0,1)
-                losses_z[idx] *= im_eps1
-            else:
-                ma = x_arr<self.fill
-                losses_z[idx] = im_eps1*simps(w[idx][ma], x=x_arr[ma])# w_sp.integrate(0.0,self.fill)#  #w_sp.integrate(0.02,self.fill-0.02) # self.fill*w_sp[x_arr<self.fill].mean() #.integrate(0.02,self.fill-0.02)
-                losses_z_op[idx] = im_eps0*w_sp.integrate(self.fill,1)
-        total_loss_z = 2*pi*v/c_light*(losses_z_op+losses_z)
+            Layer = self.Layers[get_layer_id(z, self.z_int)]
+            for x0, x1, eps_s in Layer.eps_segments(v):
+                im_eps = np.imag(eps_s)
+                if x1 <= x0 or im_eps == 0:
+                    continue
+                xmask = (xn >= x0) & (xn < x1)
+                if not xmask.any():
+                    continue
+                total_loss_z[idx] += im_eps*w[idx, xmask].sum()*dx
+        total_loss_z *= 2*pi*v/c_light
         return z_arr, total_loss_z
 
 
