@@ -910,10 +910,15 @@ class GratingStructure:
         Ic0 = km_fill(qm, self.eps_inp)
         IcN = km_fill(qm, self.eps_out)
         if polarization=='TM':
-            fg = np.vstack((I,1j*IcN/self.eps_out)) 
+            fg = np.vstack((I,1j*IcN/self.eps_out))
+            # The reflected row needs the same 1/eps factor its transmitted
+            # counterpart has: in TM the tangential field is
+            # E_x = -k_zm r_m / eps_inp.  Without it the match at z = 0 is
+            # inconsistent and energy is not conserved for eps_inp != 1.
+            fg1 = np.vstack((-I,1j*Ic0/self.eps_inp))
         else:
             fg = np.vstack((I,1j*IcN)) # 1j*IcN
-        fg1 = np.vstack((-I,1j*Ic0))
+            fg1 = np.vstack((-I,1j*Ic0))
         for Layer in reversed(self.Layers):
             fg, trans_l = Layer.layer_fg(period, k0,N,fg, k0_inc, dispersion=True, polarization=polarization)
             Layer.trans_matrix = trans_l
@@ -1682,7 +1687,8 @@ class GratingStructure:
             T = np.sqrt(self.eps_inp)*np.sqrt(self.eps_out-qm**2)*np.abs(t)**2/(self.eps_out*np.cos(theta)) 
         else:
             T = np.sqrt(self.eps_out-qm**2)*np.abs(t)**2/(np.sqrt(self.eps_inp)*np.cos(theta)) 
-        R = np.sqrt(self.eps_inp-qm**2)*np.abs(r)**2/(self.eps_inp*np.cos(theta)) #np.abs(r)**2 #
+        # normalise by the incident-medium admittance sqrt(eps_inp), not eps_inp
+        R = np.sqrt(self.eps_inp-qm**2)*np.abs(r)**2/(np.sqrt(self.eps_inp)*np.cos(theta))
         # print(T)
         mask_T = np.real(self.eps_out-qm**2)>0
         T = np.where(mask_T, T, 0)
@@ -1755,7 +1761,8 @@ class GratingStructure:
             T = np.sqrt(self.eps_inp)*np.sqrt(self.eps_out-qm**2)*np.abs(t)**2/(self.eps_out*np.cos(theta)) 
         else:
             T = np.sqrt(self.eps_out-qm**2)*np.abs(t)**2/(np.sqrt(self.eps_inp)*np.cos(theta)) 
-        R = np.sqrt(self.eps_inp-qm**2)*np.abs(r)**2/(self.eps_inp*np.cos(theta)) #np.abs(r)**2 #
+        # normalise by the incident-medium admittance sqrt(eps_inp), not eps_inp
+        R = np.sqrt(self.eps_inp-qm**2)*np.abs(r)**2/(np.sqrt(self.eps_inp)*np.cos(theta))
         # print(T)
         mask_T = np.real(self.eps_out-qm**2)>0
         T = np.where(mask_T, T, 0)
