@@ -252,6 +252,38 @@ def Exm_z(self, z, l, C_plus, C_minus, V):
     return np.squeeze(Em_z)
 
 
+class _NullBar:
+    """Inert stand-in for progressbar.ProgressBar when verbose is False.
+
+    Exists so that every spectrum driver can have exactly ONE loop body.  The
+    previous `if verbose: <loop> else: <loop>` pattern kept two copies of each
+    driver, and the copies drifted: the quiet branches variously dropped the
+    incidence angle, passed the wrong argument as Neq, or called a progress bar
+    that was never created (findings H2-H5).
+    """
+    def update(self, *args, **kwargs):
+        pass
+
+    def start(self):
+        return self
+
+    def finish(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+
+def progress_bar(max_value, verbose):
+    """A real progress bar when verbose, an inert one otherwise."""
+    if verbose:
+        return progressbar.ProgressBar(max_value=max_value)
+    return _NullBar()
+
+
 def get_layer_id(z, z_int):
     for v, k in enumerate(pairwise(z_int)):
         if z>=k[0] and z<=k[1]:
@@ -1414,28 +1446,17 @@ class GratingStructure:
         self.spectrTfull = np.zeros((N, 2*Neq+1))
         self.spectrRfull = np.zeros((N, 2*Neq+1))
         self.p_losses = np.zeros((N, len(self.Layers)))
-        if verbose:
-            with  progressbar.ProgressBar(max_value=N) as bar:
-                for i in range(N):
-                    v = self.vrange[i]
-                    maping =self.field_mapping(v, Neq, Nx,Ny, z_min, z_max, Theta=Theta)
-                    XX, YY, H, Ex, Ez, T, R = maping
-                    self.p_losses[i] = self.calculate_partial_loss(YY, Ex, Ez, v,Theta, simps_rule = simps_rule)
-                    self.spectrTfull[i] = self.T_diffraction
-                    self.spectrRfull[i] = self.R_diffraction
-                    self.spectrT[i] = self.T_diffraction[Neq]
-                    self.spectrR[i] = self.R_diffraction[Neq]
-                    bar.update(i)
-        else:
+        with progress_bar(N, verbose) as bar:
             for i in range(N):
                 v = self.vrange[i]
                 maping =self.field_mapping(v, Neq, Nx,Ny, z_min, z_max, Theta=Theta)
                 XX, YY, H, Ex, Ez, T, R = maping
-                self.p_losses[i] = self.calculate_partial_loss(YY, Ex, Ez, v,Theta, simps_rule = simps_rule )
+                self.p_losses[i] = self.calculate_partial_loss(YY, Ex, Ez, v,Theta, simps_rule = simps_rule)
                 self.spectrTfull[i] = self.T_diffraction
                 self.spectrRfull[i] = self.R_diffraction
                 self.spectrT[i] = self.T_diffraction[Neq]
                 self.spectrR[i] = self.R_diffraction[Neq]
+                bar.update(i)
         self.spectrA = 1-self.spectrT - self.spectrR
         self.spectrA_full = self._absorption_from_orders()
 
@@ -1486,12 +1507,11 @@ class GratingStructure:
         self.spectrTfull = np.zeros((N, 2 * Neq + 1))
         self.spectrRfull = np.zeros((N, 2 * Neq + 1))
         self.p_losses = np.zeros((N, len(self.Layers)))
-        
+
         if verbose:
             print(f'N_eq = {Neq}')
-            bar = progressbar.ProgressBar(max_value=N)
-            bar.start()
-        
+        bar = progress_bar(N, verbose).start()
+
         for i in range(N):
             wavelength = self.lambda_range[i]
             frequency = c_light / wavelength  # cm/s / cm = Hz
@@ -1515,13 +1535,9 @@ class GratingStructure:
             self.spectrRfull[i] = self.R_diffraction  # Ensure self.R_diffraction is updated in field_mapping
             self.spectrT[i] = self.T_diffraction[Neq]
             self.spectrR[i] = self.R_diffraction[Neq]
-            
-            if verbose:
-                bar.update(i)
-        
-        if verbose:
-            bar.finish()
-        
+            bar.update(i)
+        bar.finish()
+
         self.spectrA = 1 - self.spectrT - self.spectrR
         self.spectrA_full = self._absorption_from_orders()
 
@@ -1538,19 +1554,7 @@ class GratingStructure:
         self.spectrTfull_theta = np.zeros((N, 2*Neq+1))
         self.spectrRfull_theta = np.zeros((N, 2*Neq+1))
         self.p_losses_theta = np.zeros((N, len(self.Layers)))
-        if verbose:
-            with  progressbar.ProgressBar(max_value=N) as bar:
-                for i in range(N):
-                    Theta = theta_range[i]
-                    maping =self.field_mapping(v, Neq, Nx,Ny, z_min, z_max, Theta=Theta)
-                    XX, YY, H, Ex, Ez, T, R = maping
-                    self.p_losses_theta[i] = self.calculate_partial_loss(YY, Ex, Ez, v,Theta, simps_rule = simps_rule)
-                    self.spectrTfull_theta[i] = self.T_diffraction
-                    self.spectrRfull_theta[i] = self.R_diffraction
-                    self.spectrT_theta[i] = self.T_diffraction[Neq]
-                    self.spectrR_theta[i] = self.R_diffraction[Neq]
-                    bar.update(i)
-        else:
+        with progress_bar(N, verbose) as bar:
             for i in range(N):
                 Theta = theta_range[i]
                 maping =self.field_mapping(v, Neq, Nx,Ny, z_min, z_max, Theta=Theta)
@@ -1560,6 +1564,7 @@ class GratingStructure:
                 self.spectrRfull_theta[i] = self.R_diffraction
                 self.spectrT_theta[i] = self.T_diffraction[Neq]
                 self.spectrR_theta[i] = self.R_diffraction[Neq]
+                bar.update(i)
         self.spectrA_theta_full = self._absorption_from_orders('_theta')
 
     def calcTRLpart_loss_angle_averaged(self,v_range, Neq, pxy, z_range, Theta = 0, N_theta=5, theta_sigma = 1,simps_rule = False, verbose = True):
@@ -1596,38 +1601,13 @@ class GratingStructure:
         self.spectrTfull = np.zeros((N, 2*Neq+1))
         self.spectrRfull = np.zeros((N, 2*Neq+1))
         self.p_losses = np.zeros((N, len(self.Layers)))
-        if verbose:
-            with  progressbar.ProgressBar(max_value=N) as bar:
-                for i in range(N):
-                    v = self.vrange[i]
-                    T_theta = np.zeros(N_theta)
-                    R_theta = np.zeros(N_theta)
-
-                    p_losses = np.zeros((N_theta, len(self.Layers)))
-                    for j, theta in enumerate(theta_range+Theta):
-                        maping =self.field_mapping(v, Neq, Nx,Ny, z_min, z_max, Theta=theta)
-                        XX, YY, H, Ex, Ez, T, R = maping
-                        T_theta[j] = self.T_diffraction[Neq]
-                        R_theta[j] = self.R_diffraction[Neq]
-                        p_losses[j] = self.calculate_partial_loss(YY, Ex, Ez, v,theta, simps_rule = simps_rule)
-                    spl_losses = [CubicSpline(theta_range, p_losses[:,i]) for i in range(len(self.Layers))]
-                    spl_T = CubicSpline(theta_range, T_theta)
-                    spl_R = CubicSpline(theta_range, R_theta)
-                    integrand_T = lambda theta: kernel_func(theta)*spl_T(theta)
-                    self.spectrT[i] = quad(integrand_T, theta_range[0], theta_range[-1])[0]
-                    integrand_R = lambda theta: kernel_func(theta)*spl_R(theta)
-                    self.spectrR[i] = quad(integrand_R, theta_range[0], theta_range[-1])[0]
-                    for j in range(len(self.Layers)):
-                        integrand_loss = lambda theta: kernel_func(theta)*spl_losses[j](theta)
-                        self.p_losses[i,j] = quad(integrand_loss, theta_range[0], theta_range[-1])[0]
-                    bar.update(i)
-        else:
+        with progress_bar(N, verbose) as bar:
             for i in range(N):
                 v = self.vrange[i]
                 T_theta = np.zeros(N_theta)
                 R_theta = np.zeros(N_theta)
                 p_losses = np.zeros((N_theta, len(self.Layers)))
-                for j, theta in enumerate(theta_range):
+                for j, theta in enumerate(theta_range+Theta):
                     maping =self.field_mapping(v, Neq, Nx,Ny, z_min, z_max, Theta=theta)
                     XX, YY, H, Ex, Ez, T, R = maping
                     T_theta[j] = self.T_diffraction[Neq]
@@ -1643,11 +1623,7 @@ class GratingStructure:
                 for j in range(len(self.Layers)):
                     integrand_loss = lambda theta: kernel_func(theta)*spl_losses[j](theta)
                     self.p_losses[i,j] = quad(integrand_loss, theta_range[0], theta_range[-1])[0]
-            
-        
-
-
-
+                bar.update(i)
 
     def transmission(self,v,N):
         # print('N=',N)
@@ -1721,23 +1697,14 @@ class GratingStructure:
         self.r_s = np.zeros_like(vrange)
         N = len(vrange)
         self.vrange = vrange
-        if vebrose:
-            with progressbar.ProgressBar(max_value=N) as bar:
-                for i in range(N):
-                    v = self.vrange[i]
-                    _psi, rp, rs = self.psi(v, Neq,Theta=Theta)
-                    # print(f'v={v*1e-12}, psi={_psi}, rp={rp}, rs={rs}')
-                    self.psi_arr[i] = _psi
-                    self.r_p[i] = rp 
-                    self.r_s[i] = rs
-                    bar.update(i)
-        else:
+        with progress_bar(N, vebrose) as bar:
             for i in range(N):
-                    v = self.vrange[i]
-                    self.psi_arr[i], rp, rs = self.psi(v, Neq,Theta=Theta)
-                    self.r_p[i] = rp 
-                    self.r_s[i] = rs
-                    bar.update(i)
+                v = self.vrange[i]
+                _psi, rp, rs = self.psi(v, Neq, Theta=Theta)
+                self.psi_arr[i] = _psi
+                self.r_p[i] = rp
+                self.r_s[i] = rs
+                bar.update(i)
 
     def TR_full(self,v,N,progres=None, field = False, Theta=0, polar='TM'):
         k0 = 2*pi*v/c_light
@@ -1802,24 +1769,15 @@ class GratingStructure:
         #print(self.spectrTfull.shape)
         if vebrose:
             print(f'N_eq = {Neq}')
-        if vebrose:
-            with progressbar.ProgressBar(max_value=N) as bar:
-                for i in range(N):
-                    v = self.vrange[i]
-                    T, R = self.TR_full(v, Neq,Theta=Theta, polar = polar, field = False)
-                    self.spectrT[i] = T[Neq]
-                    self.spectrR[i] = R[Neq]
-                    self.spectrTfull[i] = T
-                    self.spectrRfull[i] = R
-                    bar.update(i)
-        else:
+        with progress_bar(N, vebrose) as bar:
             for i in range(N):
-                    v = self.vrange[i]
-                    T, R = self.TR_full(v, Neq, polar = polar, field = False)
-                    self.spectrT[i] = T[Neq]
-                    self.spectrR[i] = R[Neq]
-                    self.spectrTfull[i] = T
-                    self.spectrRfull[i] = R
+                v = self.vrange[i]
+                T, R = self.TR_full(v, Neq, Theta=Theta, polar = polar, field = False)
+                self.spectrT[i] = T[Neq]
+                self.spectrR[i] = R[Neq]
+                self.spectrTfull[i] = T
+                self.spectrRfull[i] = R
+                bar.update(i)
         self.spectrA = 1-self.spectrT - self.spectrR
         self.spectrA_full = self._absorption_from_orders()
 
@@ -1871,9 +1829,8 @@ class GratingStructure:
         
         if verbose:
             print(f'N_eq = {Neq}')
-            bar = progressbar.ProgressBar(max_value=N)
-            bar.start()
-        
+        bar = progress_bar(N, verbose).start()
+
         for i in range(N):
             wavelength = self.lambda_range[i]
             frequency = C / wavelength  # Convert wavelength to frequency
@@ -1882,13 +1839,9 @@ class GratingStructure:
             self.spectrR[i] = R[Neq]
             self.spectrTfull[i] = T
             self.spectrRfull[i] = R
-            
-            if verbose:
-                bar.update(i)
-        
-        if verbose:
-            bar.finish()
-        
+            bar.update(i)
+        bar.finish()
+
         self.spectrA = 1 - self.spectrT - self.spectrR
         self.spectrA_full = self._absorption_from_orders()
 
@@ -1901,24 +1854,15 @@ class GratingStructure:
         self.spectrR_theta = np.zeros(N)
         self.spectrTfull_theta = np.zeros((N, 2*Neq+1))
         self.spectrRfull_theta = np.zeros((N, 2*Neq+1))
-        if verbose:
-            with progressbar.ProgressBar(max_value=N) as bar:
-                for i in range(N):
-                    Theta = theta_range[i]
-                    T, R = self.TR_full(v, Neq, Theta=Theta, field = False, polar= polar)
-                    self.spectrT_theta[i] = T[Neq]
-                    self.spectrR_theta[i] = R[Neq]
-                    self.spectrTfull_theta[i] = T
-                    self.spectrRfull_theta[i] = R
-                    bar.update(i)
-        else:
+        with progress_bar(N, verbose) as bar:
             for i in range(N):
                 Theta = theta_range[i]
-                T, R = self.TR_full(v, N, Theta=Theta, field = False, polar= polar)
+                T, R = self.TR_full(v, Neq, Theta=Theta, field = False, polar= polar)
                 self.spectrT_theta[i] = T[Neq]
                 self.spectrR_theta[i] = R[Neq]
                 self.spectrTfull_theta[i] = T
                 self.spectrRfull_theta[i] = R
+                bar.update(i)
         self.spectrA_theta = 1-self.spectrT_theta - self.spectrR_theta
         self.spectrA_theta_full = self._absorption_from_orders('_theta')
 

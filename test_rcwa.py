@@ -408,3 +408,85 @@ def test_partial_loss_survives_a_wrapped_strip():
 
 if __name__ == '__main__':
     sys.exit(pytest.main([__file__, '-q', *sys.argv[1:]]))
+
+
+# ---------------------------------------------------------------------------
+# 6. the quiet path must agree with the verbose path
+#
+#   Findings H2-H5 all lived in a non-verbose loop body that had drifted from
+#   its verbose twin: dropped incidence angle, wrong argument passed as Neq, a
+#   progress bar that was never created.  Collapsing each driver to one body
+#   removes the whole class of defect; these tests pin it shut.
+# ---------------------------------------------------------------------------
+
+THETA = 25.0          # non-zero on purpose: H2 and H4 silently dropped it
+
+
+def _driver_structure():
+    return GratingStructure(
+        [GratingLayer(eps0=1.0, eps1=-11 + 1.6j, period=0.35, fill=0.5, depth=60),
+         GratingLayer.PlateLayer(eps=15.0 + 0.15j, depth=400)],
+        eps_inp=1.0, eps_out=15.0 + 0.15j)
+
+
+def _snapshot(st):
+    """Every spectrum array the drivers publish, for comparison."""
+    keys = ('spectrT', 'spectrR', 'spectrA', 'spectrA_full',
+            'spectrTfull', 'spectrRfull', 'p_losses',
+            'spectrT_theta', 'spectrR_theta', 'spectrA_theta',
+            'spectrA_theta_full', 'spectrTfull_theta', 'spectrRfull_theta',
+            'p_losses_theta', 'psi_arr', 'r_p', 'r_s')
+    return {k: np.array(getattr(st, k), dtype=float)
+            for k in keys if getattr(st, k, None) is not None}
+
+
+DRIVERS = {
+    'calcTRLandPartLoss': ('verbose', lambda st, q: st.calcTRLandPartLoss(
+        np.array([FREQ]), 8, (21, 201), (0.0, 459.0), Theta=THETA,
+        simps_rule=True, **q)),
+    'calcTRLandPartLoss_wavelength': ('verbose', lambda st, q: st.calcTRLandPartLoss_wavelength(
+        [800.0], 8, (21, 201), (0.0, 459.0), Theta=THETA, simps_rule=True, **q)),
+    'calcTRL_PartLoss_on_theta': ('verbose', lambda st, q: st.calcTRL_PartLoss_on_theta(
+        np.array([0.0, 20.0]), FREQ, 8, (21, 201), (0.0, 459.0), **q)),
+    'calcTRLpart_loss_angle_averaged': ('verbose', lambda st, q: st.calcTRLpart_loss_angle_averaged(
+        np.array([FREQ]), 6, (21, 121), (0.0, 459.0), Theta=THETA,
+        N_theta=3, theta_sigma=1.0, **q)),
+    'psi_spectra': ('vebrose', lambda st, q: st.psi_spectra(
+        np.array([FREQ, FREQ * 1.01]), Neq=6, Theta=THETA, **q)),
+    'calcTRLspectra': ('vebrose', lambda st, q: st.calcTRLspectra(
+        0, 0, vrange=np.array([FREQ]), Theta=THETA, Neq=8, **q)),
+    'calcTRLspectra_wavelength': ('verbose', lambda st, q: st.calcTRLspectra_wavelength(
+        800, 800, lambda_range=[800.0], Theta=THETA, Neq=8, **q)),
+    'calcTRL_theta': ('verbose', lambda st, q: st.calcTRL_theta(
+        np.array([0.0, 20.0]), FREQ, Neq=8, **q)),
+}
+
+
+@pytest.mark.parametrize('name', sorted(DRIVERS))
+def test_quiet_path_matches_verbose_path(name):
+    kwarg, call = DRIVERS[name]
+    loud = _driver_structure(); call(loud, {kwarg: True})
+    quiet = _driver_structure(); call(quiet, {kwarg: False})
+    a, b = _snapshot(loud), _snapshot(quiet)
+    assert set(a) == set(b), f'{name}: different attributes published'
+    assert a, f'{name}: published nothing to compare'
+    for key in a:
+        np.testing.assert_allclose(
+            a[key], b[key], rtol=0, atol=0,
+            err_msg=f'{name}.{key} differs between verbose and quiet')
+
+
+@pytest.mark.parametrize('name', sorted(DRIVERS))
+def test_quiet_path_does_not_raise(name):
+    """H3 and H5 made the quiet path raise outright."""
+    kwarg, call = DRIVERS[name]
+    call(_driver_structure(), {kwarg: False})
+
+
+def test_quiet_calcTRLspectra_respects_theta():
+    """H2 specifically: the quiet branch used to ignore Theta entirely."""
+    a = _driver_structure()
+    a.calcTRLspectra(0, 0, vrange=np.array([FREQ]), Theta=0.0, Neq=8, vebrose=False)
+    b = _driver_structure()
+    b.calcTRLspectra(0, 0, vrange=np.array([FREQ]), Theta=THETA, Neq=8, vebrose=False)
+    assert a.spectrT[0] != pytest.approx(b.spectrT[0], rel=1e-6)
