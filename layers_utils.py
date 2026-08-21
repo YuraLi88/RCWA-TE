@@ -13,7 +13,7 @@ def pairwise(iterable):
 
 
 def float_parts(x):
-    delim=re.compile('e\+?')
+    delim=re.compile(r'e\+?')
     return delim.split(f'{x:8.2e}'.strip())
 
 class phys_val():

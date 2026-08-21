@@ -540,3 +540,103 @@ def test_gratinglayer2_smoothed_accepts_a_dispersive_core():
     c1 = lay.eps_1(4, v=3e14)
     c2 = lay.eps_inv(4, v=3e14)
     assert np.isfinite(c1).all() and np.isfinite(c2).all()
+
+
+# ---------------------------------------------------------------------------
+# 8. Phase 4 hygiene
+# ---------------------------------------------------------------------------
+
+def test_opening_conductivity_is_not_gated_on_the_strip_tau():
+    """M1: eps_v_op gated on self.tau, the STRIP relaxation time, so a
+    conducting opening between lossless strips lost its conductivity."""
+    lay = GratingLayer.from_mobility(mu=0, n=0, mu_op=1000, n_op=1e19,
+                                     eps1=12.0, eps0=12.0, period=0.4,
+                                     fill=0.5, depth_mkm=0.1)
+    assert lay.tau == 0 and lay.sigma0_op > 0
+    assert np.imag(lay.eps_v_op(FREQ)) > 0, 'opening conductivity dropped'
+
+
+def test_solver_honours_the_dispersion_flag():
+    """M4: the flag was accepted and then hard-coded to True."""
+    lay = GratingLayer.from_mobility(mu=500, n=1e19, eps1=12.0, period=0.4,
+                                     fill=0.5, depth_mkm=0.1)
+    st = GratingStructure([lay], eps_inp=1.0, eps_out=1.0)
+    k0 = 2 * np.pi * FREQ / c_light
+    _, r_disp = st.solver(k0, 4, dispersion=True)
+    _, r_nodisp = st.solver(k0, 4, dispersion=False)
+    assert not np.allclose(r_disp, r_nodisp)
+
+
+def test_eps_1_does_not_mutate_eps0_on_a_plate():
+    """M5: a callable eps0 was replaced by its value at the last frequency."""
+    lay = GratingLayer.PlateLayer(eps=lambda v: 3.0 + 1j * (v / 1e15), depth=100)
+    before = lay.eps0
+    lay.eps_1(4, v=1e14)
+    lay.eps_inv(4, v=9e14)
+    assert lay.eps0 is before
+
+
+def test_mu_property_uses_the_layers_own_meff():
+    """M6: the property used the module-level meff = 0.26."""
+    for meff in (0.26, 1.0):
+        lay = GratingLayer.from_mobility(mu=800.0, n=1e19, meff=meff, eps1=12.0,
+                                         period=0.4, fill=0.5, depth_mkm=0.1)
+        assert lay.mu == pytest.approx(800.0, rel=1e-9), f'meff={meff}'
+
+
+def test_mismatched_patterned_periods_are_rejected():
+    """M7: the period was silently taken from Layers[0]."""
+    with pytest.raises(ValueError, match='period'):
+        GratingStructure([GratingLayer(period=0.5, depth=50),
+                          GratingLayer(period=0.7, depth=50)],
+                         eps_inp=1.0, eps_out=1.0)
+
+
+def test_plate_period_does_not_participate_in_the_check():
+    """A plate is uniform in x, so PlateLayer's default period is irrelevant."""
+    GratingStructure([GratingLayer(period=0.35, fill=0.5, depth=60),
+                      GratingLayer.PlateLayer(eps=12.0, depth=400)],
+                     eps_inp=1.0, eps_out=1.0)
+
+
+@pytest.mark.parametrize('pol', ['TM', 'TE'])
+def test_optimized_false_works_for_plate_layers(pol):
+    """M8: eps_1 returned a length-1 array for plates, which toeplitz_0 could
+    not consume, so the generic eigen path produced garbage."""
+    slow = GratingStructure([GratingLayer(eps0=EPS_FILM, eps1=EPS_FILM, depth=D_NM,
+                                          plate=True, optimized=False)],
+                            eps_inp=1.0, eps_out=1.0)
+    T, R = slow.TR_full(FREQ, 3, Theta=40.0, polar=pol)
+    R_ref, T_ref = fresnel_film(1.0, EPS_FILM, 1.0, D_NM * 1e-7, LAM_CM, 40.0, pol)
+    assert T[3] == pytest.approx(T_ref, abs=1e-9)
+    assert R[3] == pytest.approx(R_ref, abs=1e-9)
+
+
+def test_wavelength_drivers_agree_on_the_same_wavelength():
+    """M11: one driver used C = 299792458 m/s and the other c_light cm/s, so
+    they disagreed by 2.5e-06 for identical input."""
+    def build():
+        return GratingStructure(
+            [GratingLayer(eps0=1.0, eps1=-11 + 1.6j, period=0.35, fill=0.5, depth=60),
+             GratingLayer.PlateLayer(eps=15.0 + 0.15j, depth=400)],
+            eps_inp=1.0, eps_out=15.0 + 0.15j)
+    a = build(); a.calcTRLspectra_wavelength(800, 800, lambda_range=[800.0],
+                                             Neq=10, verbose=False)
+    b = build(); b.calcTRLandPartLoss_wavelength([800.0], 10, (21, 201), (0.0, 459.0),
+                                                 verbose=False)
+    assert a.spectrT[0] == pytest.approx(b.spectrT[0], rel=1e-12)
+
+
+@pytest.mark.parametrize('driver', ['calcTRLspectra', 'psi_spectra'])
+def test_verbose_alias_for_the_misspelled_vebrose(driver):
+    """M16: two drivers spell the keyword `vebrose`; `verbose` now works too."""
+    st = GratingStructure(
+        [GratingLayer(eps0=1.0, eps1=-11 + 1.6j, period=0.35, fill=0.5, depth=60),
+         GratingLayer.PlateLayer(eps=15.0 + 0.15j, depth=400)],
+        eps_inp=1.0, eps_out=1.0)
+    if driver == 'calcTRLspectra':
+        st.calcTRLspectra(0, 0, vrange=np.array([FREQ]), Neq=6, verbose=False)
+        assert st.spectrT.shape == (1,)
+    else:
+        st.psi_spectra(np.array([FREQ]), Neq=6, verbose=False)
+        assert st.psi_arr.shape == (1,)
