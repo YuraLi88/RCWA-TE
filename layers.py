@@ -704,9 +704,21 @@ class GratingLayer:
         return xx, zz, _E, _H
 
 class GratingLayer2(GratingLayer):
-    def __init__(self, period=1, fill=0.5, fill2 = 0.6, depth=10, eps0=1, eps1=None, eps2= None, 
-                sigma0=0, sigma0_op=0, tau=0, tau_op=0, plate=False, meff=0.26, dispersion_type=None, material_type=None, material={}, optimized=True, name=None):
-        super().__init__(period, fill, depth, eps0, eps1, sigma0, sigma0_op, tau, tau_op, plate, meff, dispersion_type, material_type, material, optimized, name)
+    def __init__(self, period=1, fill=0.5, fill2 = 0.6, depth=10, eps0=1, eps1=None, eps2= None,
+                sigma0=0, sigma0_op=0, tau=0, tau_op=0, plate=False, meff=0.26,
+                dispersion_type=None, material_type=None, material={},
+                optimized=True, smoothed=False, delta=0.01, name=None):
+        # Keyword arguments, not positional: the parent gained `smoothed` and
+        # `delta` before `name`, so the old positional call passed `name` into
+        # `smoothed` -- a named layer silently switched eps_1 to the smoothed
+        # branch and lost its name (finding H7).
+        super().__init__(period=period, fill=fill, depth=depth, eps0=eps0, eps1=eps1,
+                         sigma0=sigma0, sigma0_op=sigma0_op, tau=tau, tau_op=tau_op,
+                         plate=plate, meff=meff, dispersion_type=dispersion_type,
+                         material_type=material_type, material=material,
+                         optimized=optimized, smoothed=smoothed, delta=delta,
+                         name=name)
+        self.layer_type = 'GratingLayer2'
         self.eps2 = eps0 if eps2 is None else eps2
         self.fill2 = fill2
 
@@ -725,7 +737,7 @@ class GratingLayer2(GratingLayer):
         else:
             eps0 = self.eps_v_op(v=v)
         if self.smoothed:
-            f_coefs = get_eps_smoothed_coefs(N, [self.fill, self.fill2],[self.eps2, eps1, eps0], dx = self.delta )
+            f_coefs = get_eps_smoothed_coefs(N, [self.fill, self.fill2],[eps2, eps1, eps0], dx = self.delta )
         else:
             _eps1 = lambda x: eps_i(x,self.fill)
             _eps1 = np.vectorize(_eps1)
@@ -1258,7 +1270,10 @@ class GratingStructure:
         X1 = X-self.Layers[0].fill*period/2
         exmX = np.exp(1j*qm[:,None]*k0*X1)
         l_free =k0*np.diag(km_fill(qm, self.eps_out))
-        L_idxs = np.searchsorted(z_int, Z, side='right') - 1
+        # clip: a sample landing exactly on the last interface would
+        # otherwise index one past the final layer (finding H6)
+        L_idxs = np.clip(np.searchsorted(z_int, Z, side='right') - 1,
+                         0, len(self.Layers) - 1)
         # pdb.set_trace()
         for idx_z in Z_idxs:
             z = Z[idx_z]
