@@ -11,7 +11,11 @@ from matplotlib import pyplot as plt
 import logging
 from numba import njit 
 import time 
-from scipy.integrate import  trapz, simps, quad
+try:                              # SciPy >= 1.14 renamed these (M14)
+    from scipy.integrate import trapezoid as trapz, simpson as simps
+except ImportError:                   # SciPy < 1.6
+    from scipy.integrate import trapz, simps
+from scipy.integrate import quad
 import progressbar
 from foruier import get_eps_smoothed_coefs
 import pdb
@@ -30,7 +34,7 @@ def eps_i(m,f):
 logging.basicConfig(filename='RCWA.log', level=logging.ERROR)
 logger = logging.getLogger()
 #spead of light, cm/s
-c_light = 2.998e10
+c_light = 2.99792458e10  # cm/s, exact SI value
 v = 1e12
 m0 = 9.11e-28 # g
 m0kg = 9.11e-31 # kg
@@ -78,16 +82,9 @@ def qm_fill(period,N,k0):
     q0 = 2*pi/period/k0
     return q0*np.arange(-N,N+1,dtype=np.complex128)     
 
-@njit
-# def km_fill(qm, eps_j):
-#     #print('qm=',qm)
-#     k=(qm*qm).astype(np.complex128)
-#     k_m = np.sqrt(k-eps_j)
-#     k_m = np.where(np.real(k-eps_j)>0,k_m,np.real(k_m)-1j*np.abs(np.imag(k_m)))
-#     return np.diag(k_m)
-
+@njit   # intentional: this decorator used to float above a commented-out
+        # version of the function, which made it look accidental (M9)
 def km_fill(qm, eps_j):
-    #print('qm=',qm)
     k=(qm*qm).astype(np.complex128)
     k_m = np.sqrt(k-eps_j)
     k_m1 = np.sqrt(eps_j-k)
@@ -243,15 +240,6 @@ def sqrt_(x):
     x=np.sqrt(x)
     return x #np.where(np.real(x)>0,x,-x)
 
-def Exm_z(self, z, l, C_plus, C_minus, V): 
-    psi = l*z
-    Lam_plus = np.diag(np.exp(-psi)) 
-    Lam_minus = np.diag(np.exp(psi)) 
-    LC = Lam_plus@C_plus - Lam_minus@C_minus
-    Em_z =  V@LC
-    return np.squeeze(Em_z)
-
-
 class _NullBar:
     """Inert stand-in for progressbar.ProgressBar when verbose is False.
 
@@ -367,7 +355,7 @@ class GratingLayer:
     def PlateLayer(cls, eps,  depth=10, depth_mkm=None,
                   sigma0=0, tau = 0, 
                   meff=0.26,
-                  dispersion_type=None,name=None ):
+                  dispersion_type=None,name=None, period=1 ):
                  depth_nm = depth
                  if depth_mkm is not None:
                      depth_nm = depth_mkm*1000
@@ -377,6 +365,7 @@ class GratingLayer:
                             tau=tau,  
                             meff=meff,  
                             depth=depth_nm,
+                            period=period,
                             dispersion_type= dispersion_type,
                             name = name)
 
@@ -449,7 +438,8 @@ class GratingLayer:
 
     @property
     def mu(self):
-        return 1e4*elCI*self.tau/(m0kg*meff)
+        # self.meff, not the module-level default (M6)
+        return 1e4*elCI*self.tau/(m0kg*self.meff)
 
     @mu.setter
     def mu(self,muCI):
@@ -493,7 +483,8 @@ class GratingLayer:
         if v is not None and callable(self.eps0):
               return self.eps0(v)+2j*self.sigma_op(v)/v
         if self.dispersion_type is None:
-            if v is None or self.tau==0:
+            # gate on the OPENING's conductivity, not the strip's tau (M1)
+            if v is None or self.sigma0_op==0:
                 return self.eps0
             return self.eps0+2j*self.sigma_op(v)/v
         elif self.dispersion_type=='InSb':
@@ -506,9 +497,13 @@ class GratingLayer:
     def eps_1(self,N, v=None):
         eps1 = self.eps_v(v=v)
         if self.plate:
-            self.eps0=eps1
-            eps0 = eps1
-            return np.array([eps0])
+            # A plate is uniform: return the full coefficient set rather than a
+            # length-1 array, which keeps optimized=False usable (M8).  self.eps0
+            # is no longer overwritten here -- that replaced a callable eps0 with
+            # its value at whichever frequency ran last (M5).
+            f_coefs = np.zeros(2*N+1, dtype=np.complex128)
+            f_coefs[N] = eps1
+            return f_coefs
         else:
             eps0 = self.eps_v_op(v=v)
         if self.smoothed:
@@ -525,10 +520,10 @@ class GratingLayer:
         eps = np.vectorize(eps)
         eps1 = self.eps_v(v)
         if self.plate:
-            self.eps0=eps1
-            eps0 = eps1
-        else:
-            eps0 = self.eps_v_op(v=v)
+            f_coefs = np.zeros(2*N+1, dtype=np.complex128)
+            f_coefs[N] = 1.0/eps1
+            return f_coefs
+        eps0 = self.eps_v_op(v=v)
         assert eps0 != 0, 'eps0 must be positive'
         assert eps1 != 0, 'eps1 must be positive'
         eps0=1/eps0
@@ -683,26 +678,6 @@ class GratingLayer:
         LC_H = self.W@LC_H
         return np.squeeze(Em_z), np.squeeze(LC_H)
  
-    def field_map(self,k0, qm, period, Nx, Nz):
-        z_max = self.depth
-        x_max = period
-
-        Z = np.linspace(0, z_max, Nz)
-        X = np.linspace(0, x_max, Nx)
-        l = k0*self.L
-
-        xx, zz = np.meshgrid(X,Z)
-        _E = np.zeros(shape = xx.shape, dtype = np.complex128)
-        _H = np.zeros(shape = xx.shape, dtype = np.complex128)
-
-        for idx_z in range(Nz):
-            Em_z, Hm_z = self.Exm_z(Z[idx_z], l, idx_z)
-
-            for idx_x in range(Nx):
-                _E[idx_z, idx_x]  = Em_z.dot(np.exp(1j*qm*k0*X[idx_x]))
-                _H[idx_z, idx_x]  = Hm_z.dot(np.exp(1j*qm*k0*X[idx_x]))
-        return xx, zz, _E, _H
-
 class GratingLayer2(GratingLayer):
     def __init__(self, period=1, fill=0.5, fill2 = 0.6, depth=10, eps0=1, eps1=None, eps2= None,
                 sigma0=0, sigma0_op=0, tau=0, tau_op=0, plate=False, meff=0.26,
@@ -731,9 +706,13 @@ class GratingLayer2(GratingLayer):
             eps2 = self.eps2
 
         if self.plate:
-            self.eps0=eps1
-            eps0 = eps1
-            return np.array([eps0])
+            # A plate is uniform: return the full coefficient set rather than a
+            # length-1 array, which keeps optimized=False usable (M8).  self.eps0
+            # is no longer overwritten here -- that replaced a callable eps0 with
+            # its value at whichever frequency ran last (M5).
+            f_coefs = np.zeros(2*N+1, dtype=np.complex128)
+            f_coefs[N] = eps1
+            return f_coefs
         else:
             eps0 = self.eps_v_op(v=v)
         if self.smoothed:
@@ -764,10 +743,10 @@ class GratingLayer2(GratingLayer):
         _eps2 = np.vectorize(lambda x: eps_i(x,self.fill2))
         eps1 = self.eps_v(v)
         if self.plate:
-            self.eps0=eps1
-            eps0 = eps1
-        else:
-            eps0 = self.eps_v_op(v=v)
+            f_coefs = np.zeros(2*N+1, dtype=np.complex128)
+            f_coefs[N] = 1.0/eps1
+            return f_coefs
+        eps0 = self.eps_v_op(v=v)
         assert eps0 != 0, 'eps0 must be positive'
         assert eps1 != 0, 'eps1 must be positive'
         eps0=1/eps0
@@ -901,6 +880,13 @@ class GratingStructure:
             self.fill = self.Layers[0].fill
         except:
             print('No fill value')
+        # Only layers with lateral structure need a common period; a plate is
+        # uniform in x, so its `period` is meaningless and PlateLayer leaves it
+        # at the default (M7).
+        periods = {round(float(L.period), 15) for L in Layers if not L.plate}
+        if len(periods) > 1:
+            raise ValueError('all patterned layers must share one period; got '
+                             + ', '.join(f'{q*1e4:g} um' for q in sorted(periods)))
         z_int = np.zeros(len(Layers)+1)
         for idx,Layer in enumerate(Layers):
             z_int[idx+1]+= z_int[idx]+Layer.depth
@@ -964,7 +950,7 @@ class GratingStructure:
             fg = np.vstack((I,1j*IcN)) # 1j*IcN
             fg1 = np.vstack((-I,1j*Ic0))
         for Layer in reversed(self.Layers):
-            fg, trans_l = Layer.layer_fg(period, k0,N,fg, k0_inc, dispersion=True, polarization=polarization)
+            fg, trans_l = Layer.layer_fg(period, k0,N,fg, k0_inc, dispersion=dispersion, polarization=polarization)
             Layer.trans_matrix = trans_l
         
         M = np.block([fg,fg1])
@@ -1646,11 +1632,6 @@ class GratingStructure:
         t,r = self.solver(k0,N)
         return np.abs(t[N])**2
  
-    def transmission0(self,v,N):
-        k0 = 2*pi*v/c_light
-        t,r = self.Amn(k0,N)
-        return np.abs(t[N])**2
-    
     def get_diffraction_orders(self,v, N, t, r, polar='TM', Theta = 0):
         """ Calculate diffraction orders from the raw fourier field harmonics
 
@@ -1706,7 +1687,10 @@ class GratingStructure:
             _psi = np.degrees(_psi)
         return _psi, r_TM, r_TE
 
-    def psi_spectra(self, vrange, Neq=50, vebrose=True, Theta=0):
+    def psi_spectra(self, vrange, Neq=50, vebrose=True, Theta=0, verbose=None):
+        # `vebrose` is the historical (misspelled) name; `verbose` wins if given (M16)
+        if verbose is not None:
+            vebrose = verbose
         self.psi_arr = np.zeros_like(vrange)
         self.r_p = np.zeros_like(vrange)
         self.r_s = np.zeros_like(vrange)
@@ -1768,7 +1752,10 @@ class GratingStructure:
         t,r = self.solver(k0,N, Theta=Theta, polarization=polar, field = field)
         return t[N], r[N]
 
-    def calcTRLspectra(self,v0, v1,vrange = None, Theta =0, N=100,Neq=50,units='Hz',polar='TM',  vebrose = True):
+    def calcTRLspectra(self,v0, v1,vrange = None, Theta =0, N=100,Neq=50,units='Hz',polar='TM',  vebrose = True, verbose = None):
+        # `vebrose` is the historical (misspelled) name; `verbose` wins if given (M16)
+        if verbose is not None:
+            vebrose = verbose
         if vrange is not None:
             self.vrange = vrange
             N = len(vrange)
@@ -1821,7 +1808,7 @@ class GratingStructure:
             verbose (bool, optional): If True, prints progress. Defaults to True.
         """
         # Convert wavelength range to meters based on units
-        C = 299792458
+        C = c_light*1e-2   # m/s, the same constant used everywhere else
         unit_factors = {'m': 1, 'nm': 1e-9, 'um': 1e-6}
         if units not in unit_factors:
             raise ValueError("Unsupported units. Choose from 'm', 'nm', 'um'.")
@@ -1891,7 +1878,7 @@ class GratingStructure:
             vs = v*1e-12 
         elif units=='cm':
             vs = np.linspace(v0,v1,N)
-            v = vs*3e10 
+            v = vs*c_light
 
         T_v = np.vectorize(lambda x: self.TR(x,Neq,polar='TM'))
         T_TM,R_TM = T_v(v)
@@ -1975,7 +1962,7 @@ class GratingStructure:
             subplt1.set_xlabel(self.title_format({names[0]:x,names[1]:y}), size=9.5)
 
         fig.subplots_adjust(wspace=0.18, hspace=0.4)
-        self=deepcopy(back)
+        self.Layers = back.Layers   # restore; rebinding `self` restored nothing
 
     def title_format(self,dic_args):
         return ', '.join([self.titles[key].format(val) for key,val in dic_args.items()])
