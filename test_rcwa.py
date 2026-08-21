@@ -490,3 +490,53 @@ def test_quiet_calcTRLspectra_respects_theta():
     b = _driver_structure()
     b.calcTRLspectra(0, 0, vrange=np.array([FREQ]), Theta=THETA, Neq=8, vebrose=False)
     assert a.spectrT[0] != pytest.approx(b.spectrT[0], rel=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# 7. H6-H8
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize('d1,d2', [(100, 400), (120, 400), (250, 250)])
+def test_exz_field_mapping_accepts_zmax_on_the_last_interface(d1, d2):
+    """H6: searchsorted(..., 'right') - 1 indexed one past the last layer.
+
+    The bug needs the last z sample to land *exactly* on z_int[-1], which only
+    happens when d1*1e-7 + d2*1e-7 == (d1+d2)*1e-7 in floating point -- true
+    for these depths, false for e.g. (60, 400).  The precondition is asserted
+    so the test cannot quietly stop exercising the defect.
+    """
+    layers = [GratingLayer(eps0=1.0, eps1=-11 + 1.6j, period=0.35, fill=0.5, depth=d1),
+              GratingLayer.PlateLayer(eps=15.0 + 0.15j, depth=d2)]
+    st = GratingStructure(layers, eps_inp=1.0, eps_out=1.0)
+    total_nm = float(d1 + d2)
+    Nz = 41
+    assert np.linspace(0.0, total_nm * 1e-7, Nz)[-1] == st.z_int[-1], (
+        'precondition: the last sample must sit exactly on the interface')
+    st.Exz_field_mapping(FREQ, 8, 21, Nz, 0.0, total_nm)
+
+
+def test_gratinglayer2_name_does_not_become_smoothed():
+    """H7: 16 positional args made `name` land on the parent's `smoothed`."""
+    plain = GratingLayer2(eps0=1, eps1=2.0, eps2=9.0, fill=0.4, fill2=0.5, depth=50)
+    named = GratingLayer2(eps0=1, eps1=2.0, eps2=9.0, fill=0.4, fill2=0.5, depth=50,
+                          name='Cu core')
+    assert named.name == 'Cu core'
+    assert named.smoothed is False and plain.smoothed is False
+    np.testing.assert_allclose(plain.eps_1(4), named.eps_1(4), rtol=0, atol=0)
+
+
+def test_gratinglayer2_accepts_smoothed_and_delta():
+    """H7: the subclass did not expose the parent's smoothing controls at all."""
+    lay = GratingLayer2(eps0=1, eps1=2.0, eps2=9.0, fill=0.4, fill2=0.5, depth=50,
+                        smoothed=True, delta=0.02)
+    assert lay.smoothed is True and lay.delta == 0.02
+    assert np.asarray(lay.eps_1(4)).shape == (9,)
+
+
+def test_gratinglayer2_smoothed_accepts_a_dispersive_core():
+    """H8: the smoothed branch passed the raw callable eps2 to quadrature."""
+    lay = GratingLayer2(eps0=1, eps1=2.0, eps2=lambda v: -20 + 2j,
+                        fill=0.4, fill2=0.5, depth=50, smoothed=True)
+    c1 = lay.eps_1(4, v=3e14)
+    c2 = lay.eps_inv(4, v=3e14)
+    assert np.isfinite(c1).all() and np.isfinite(c2).all()
